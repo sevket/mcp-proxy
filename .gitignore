@@ -1,0 +1,8 @@
+node_modules/
+proxy-config.json
+
+*.log
+*.tgz
+.DS_Store
+.env
+.env.*
