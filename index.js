@@ -1,7 +1,7 @@
+#!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { join } from "path";
 import { log } from "./src/logger.js";
 import { loadConfig, readAndValidateConfig, watchConfigFile } from "./src/config.js";
 import {
@@ -15,8 +15,11 @@ import {
 } from "./src/child-manager.js";
 import { registerHandlers } from "./src/router.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CONFIG_PATH = join(__dirname, "proxy-config.json");
+// Resolved from the current working directory (not the script's own
+// location), so a global/npx install picks up the config in whatever
+// directory the user runs it from, same as a local clone run from its
+// own repo root.
+const CONFIG_PATH = join(process.cwd(), "proxy-config.json");
 
 let config = loadConfig(CONFIG_PATH);
 let server;

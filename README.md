@@ -22,7 +22,15 @@ Agent sees: 3 tools                          Reality: 244 tools
 
 ## Quick Start
 
-### 1. Clone and install
+### 1. Install
+
+Via `npx` (no local clone needed):
+
+```bash
+npx mcp-tool-proxy
+```
+
+Or clone and install for local development:
 
 ```bash
 git clone https://github.com/sevket/mcp-proxy.git
@@ -67,13 +75,15 @@ Instead of registering each MCP server individually, register only the proxy. He
 {
   "mcpServers": {
     "mcp-proxy": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-proxy/index.js"],
+      "command": "npx",
+      "args": ["-y", "mcp-tool-proxy"],
       "env": {}
     }
   }
 }
 ```
+
+(Or `"command": "node", "args": ["/absolute/path/to/mcp-proxy/index.js"]` for a local clone.)
 
 Restart your MCP client — you should see one tool per child MCP server.
 
@@ -95,7 +105,7 @@ Each meta-tool accepts two parameters:
 
 ## Adding a New MCP Server
 
-Add a new entry to `proxy-config.json` and restart the proxy:
+Add a new entry to `proxy-config.json`:
 
 ```json
 {
@@ -109,7 +119,7 @@ Add a new entry to `proxy-config.json` and restart the proxy:
 }
 ```
 
-The new MCP server will automatically appear as a meta-tool.
+The proxy watches `proxy-config.json` and picks up changes live — no restart needed. The new server connects and appears as a meta-tool within a second or so of saving the file.
 
 ## Troubleshooting
 
@@ -117,13 +127,21 @@ The new MCP server will automatically appear as a meta-tool.
 |-------|----------|
 | Child MCP fails to connect | Check the `command` path and `env.PATH` in `proxy-config.json`. Use absolute paths if needed. |
 | Tool not found | Check proxy logs in stderr. Verify the tool exists in the child MCP. |
-| Agent doesn't see updated tools | Restart both the proxy and the MCP client. |
+| Agent doesn't see updated tools | Config changes hot-reload automatically; if it still doesn't show up, check stderr for a "config reload failed" line (invalid JSON keeps the previous config running). |
 | Partial startup | The proxy continues even if some children fail — check logs for errors. |
+
+## Security Model
+
+`proxy-config.json` entries are spawned directly (`command` + `args`, with `env` merged into the child's environment) — the proxy does not sandbox or validate what a `command` actually does. Treat this file like a shell script you'd run yourself: only put servers in it that you configured, and never point it at a `proxy-config.json` you downloaded or received from someone else without reading it first. There's no per-server permission model beyond `toolAllowlist` (which filters which *tool names* are reachable, not what those tools are allowed to do).
 
 ## Requirements
 
 - Node.js 18+
 - npm
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

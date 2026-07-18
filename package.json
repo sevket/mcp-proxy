@@ -1,11 +1,22 @@
 {
-  "name": "mcp-proxy",
+  "name": "mcp-tool-proxy",
   "version": "1.0.0",
   "description": "Lightweight MCP proxy that consolidates multiple MCP servers into single meta-tools",
   "type": "module",
   "main": "index.js",
+  "bin": {
+    "mcp-tool-proxy": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "proxy-config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "keywords": [
     "mcp",
@@ -16,6 +27,9 @@
     "ai-tools"
   ],
   "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0"
   }
