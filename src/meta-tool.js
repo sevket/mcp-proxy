@@ -1,5 +1,18 @@
 import { toolMaps } from "./child-manager.js";
 
+const DESCRIPTION_TRUNCATE_LENGTH = 200;
+const MANY_TOOLS_THRESHOLD = 30;
+
+const SEARCH_PROPERTY = {
+  type: "string",
+  description:
+    'Alternative to tool_name/tool_input: look up matching sub-tools by name/description and get their full input schema back, without calling anything. Use this instead of tool_name/tool_input, e.g. {"search": "screenshot"}.',
+};
+
+function flattenWhitespace(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 export function buildMetaTool(mcpName) {
   const subTools = toolMaps[mcpName];
 
@@ -21,22 +34,27 @@ export function buildMetaTool(mcpName) {
             type: "object",
             description: "Arguments for the chosen tool (as defined by that tool's schema).",
           },
+          search: SEARCH_PROPERTY,
         },
-        required: ["tool_name", "tool_input"],
+        anyOf: [{ required: ["tool_name", "tool_input"] }, { required: ["search"] }],
       },
     };
   }
 
   const toolNames = Object.keys(subTools);
-  const toolSummaries = toolNames
-    .map((t) => `${t}: ${(subTools[t].description || "").slice(0, 80)}`)
-    .join("\n");
+  const toolSummaries =
+    toolNames.length > MANY_TOOLS_THRESHOLD
+      ? `${toolNames.join(", ")}\n\n(${toolNames.length} tools — call with tool_name=<name> to try one, or {"search": "<term>"} to see a matching tool's full schema.)`
+      : toolNames
+          .map((t) => `${t}: ${flattenWhitespace(subTools[t].description || "").slice(0, DESCRIPTION_TRUNCATE_LENGTH)}`)
+          .join("\n");
 
   return {
     name: mcpName,
     description:
       `Proxy to the "${mcpName}" MCP server.\n` +
-      `Pass tool_name (one of ${toolNames.length} tools) and tool_input.\n\n` +
+      `Pass tool_name (one of ${toolNames.length} tools) and tool_input. ` +
+      `Or pass {"search": "<term>"} instead to look up a tool's full schema.\n\n` +
       `Available tools:\n${toolSummaries}`,
     inputSchema: {
       type: "object",
@@ -50,8 +68,9 @@ export function buildMetaTool(mcpName) {
           type: "object",
           description: "Arguments for the chosen tool (as defined by that tool's schema).",
         },
+        search: SEARCH_PROPERTY,
       },
-      required: ["tool_name", "tool_input"],
+      anyOf: [{ required: ["tool_name", "tool_input"] }, { required: ["search"] }],
     },
   };
 }

@@ -81,6 +81,60 @@ test("callTool reports a clear unavailable reason for a server that never connec
   assert.match(result.content[0].text, /not connected/);
 });
 
+test("callTool suggests the closest tool name on a typo", async () => {
+  const { client } = await makeConnectedTestClient();
+  await connectChild("thing", { command: "node", args: [FIXTURE] });
+  try {
+    const result = await client.callTool({
+      name: "thing",
+      arguments: { tool_name: "ad", tool_input: {} },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Did you mean: add/);
+  } finally {
+    disconnectChild("thing");
+  }
+});
+
+test("callTool search mode returns matching sub-tool schemas without calling anything", async () => {
+  const { client } = await makeConnectedTestClient();
+  await connectChild("thing", { command: "node", args: [FIXTURE] });
+  try {
+    const result = await client.callTool({
+      name: "thing",
+      arguments: { search: "add" },
+    });
+    const matches = JSON.parse(result.content[0].text);
+    assert.equal(matches.length, 1);
+    assert.equal(matches[0].name, "add");
+    assert.ok(matches[0].inputSchema);
+
+    const noMatches = await client.callTool({
+      name: "thing",
+      arguments: { search: "nonexistent" },
+    });
+    assert.match(noMatches.content[0].text, /No tools matching/);
+  } finally {
+    disconnectChild("thing");
+  }
+});
+
+test("callTool caps oversized text results", async () => {
+  const { client } = await makeConnectedTestClient();
+  await connectChild("thing", { command: "node", args: [FIXTURE], maxResultBytes: 50 });
+  try {
+    const bigText = "x".repeat(200);
+    const result = await client.callTool({
+      name: "thing",
+      arguments: { tool_name: "echo", tool_input: { text: bigText } },
+    });
+    assert.ok(result.content[0].text.startsWith("x".repeat(50)));
+    assert.match(result.content[0].text, /truncated, 200 bytes total/);
+  } finally {
+    disconnectChild("thing");
+  }
+});
+
 test("callTool enforces the per-call timeout", async () => {
   const { client } = await makeConnectedTestClient();
   await connectChild("slow", {

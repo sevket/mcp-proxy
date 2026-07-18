@@ -5,7 +5,7 @@
   "type": "module",
   "main": "index.js",
   "bin": {
-    "mcp-tool-proxy": "./index.js"
+    "mcp-tool-proxy": "index.js"
   },
   "files": [
     "index.js",

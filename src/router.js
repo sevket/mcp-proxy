@@ -7,6 +7,7 @@ import {
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { buildMetaTool } from "./meta-tool.js";
+import { closestMatches } from "./fuzzy-match.js";
 import {
   clients,
   toolMaps,
@@ -21,6 +22,19 @@ import {
 } from "./child-manager.js";
 
 const NS_DELIM = "::";
+const DEFAULT_MAX_RESULT_BYTES = 50_000;
+
+function capContentSize(result, maxBytes) {
+  if (!result || !Array.isArray(result.content)) return result;
+  const content = result.content.map((block) => {
+    if (block.type === "text" && typeof block.text === "string" && block.text.length > maxBytes) {
+      const total = block.text.length;
+      return { ...block, text: `${block.text.slice(0, maxBytes)}\n...[truncated, ${total} bytes total]` };
+    }
+    return block;
+  });
+  return { ...result, content };
+}
 
 function splitNamespaced(id) {
   const idx = id.indexOf(NS_DELIM);
@@ -101,25 +115,47 @@ export function registerHandlers(server) {
       return error(`MCP "${mcpName}" is not connected.`);
     }
 
+    if (typeof args?.search === "string") {
+      const term = args.search.toLowerCase();
+      const matches = Object.values(toolMaps[mcpName]).filter(
+        (t) => t.name.toLowerCase().includes(term) || (t.description || "").toLowerCase().includes(term)
+      );
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              matches.length > 0
+                ? JSON.stringify(matches, null, 2)
+                : `No tools matching "${args.search}" found in "${mcpName}".`,
+          },
+        ],
+      };
+    }
+
     if (!tool_name) {
       return error(`"tool_name" is required. Available: ${Object.keys(toolMaps[mcpName]).join(", ")}`);
     }
 
     if (!toolMaps[mcpName][tool_name]) {
+      const suggestions = closestMatches(tool_name, Object.keys(toolMaps[mcpName]));
+      const hint = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : "";
       return error(
-        `Tool "${tool_name}" not found in "${mcpName}". ` +
+        `Tool "${tool_name}" not found in "${mcpName}".${hint} ` +
         `Available: ${Object.keys(toolMaps[mcpName]).join(", ")}`
       );
     }
 
     const callTimeoutMs = (configs[mcpName] && configs[mcpName].callTimeoutMs) || DEFAULT_CALL_TIMEOUT_MS;
+    const maxResultBytes = (configs[mcpName] && configs[mcpName].maxResultBytes) || DEFAULT_MAX_RESULT_BYTES;
 
     try {
-      return await withTimeout(
+      const result = await withTimeout(
         client.callTool({ name: tool_name, arguments: tool_input ?? {} }),
         callTimeoutMs,
         `${mcpName}.${tool_name} timed out after ${callTimeoutMs}ms`
       );
+      return capContentSize(result, maxResultBytes);
     } catch (e) {
       return error(`${mcpName}.${tool_name} failed: ${e.message}`);
     }
