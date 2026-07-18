@@ -1,241 +1,107 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { log } from "./src/logger.js";
+import { loadConfig, readAndValidateConfig, watchConfigFile } from "./src/config.js";
+import {
+  clients,
+  toolMaps,
+  configs,
+  unavailableReasons,
+  pendingLazy,
+  connectChild,
+  disconnectChild,
+} from "./src/child-manager.js";
+import { registerHandlers } from "./src/router.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const CONFIG_PATH = join(__dirname, "proxy-config.json");
 
-const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
-const DEFAULT_CALL_TIMEOUT_MS = 30_000;
-const RECONNECT_DELAYS_MS = [1_000, 4_000, 9_000];
+let config = loadConfig(CONFIG_PATH);
+let server;
 
-let config;
-try {
-  config = JSON.parse(readFileSync(join(__dirname, "proxy-config.json"), "utf-8"));
-} catch (err) {
-  console.error(`mcp-proxy: could not read proxy-config.json: ${err.message}`);
-  process.exit(1);
-}
-validateConfig(config);
-
-const clients = {};
-const toolMaps = {};
-const configs = {};
-const unavailableReasons = {};
-
-function validateConfig(cfg) {
-  if (!cfg || typeof cfg !== "object" || typeof cfg.mcpServers !== "object" || cfg.mcpServers === null) {
-    console.error('mcp-proxy: proxy-config.json must have a top-level "mcpServers" object.');
-    process.exit(1);
+async function connectOrMarkLazy(name, serverCfg) {
+  configs[name] = serverCfg;
+  if (serverCfg.lazy) {
+    toolMaps[name] = null;
+    pendingLazy.add(name);
+    log(`[${name}] lazy — will connect on first use`);
+    return;
   }
-
-  for (const [name, serverCfg] of Object.entries(cfg.mcpServers)) {
-    if (!serverCfg || typeof serverCfg.command !== "string" || serverCfg.command.length === 0) {
-      console.error(`mcp-proxy: server "${name}" is missing a valid "command" string.`);
-      process.exit(1);
-    }
-    if (serverCfg.args !== undefined && !Array.isArray(serverCfg.args)) {
-      console.error(`mcp-proxy: server "${name}".args must be an array if present.`);
-      process.exit(1);
-    }
-    if (serverCfg.env && typeof serverCfg.env === "object") {
-      for (const [key, value] of Object.entries(serverCfg.env)) {
-        if (value === "") {
-          log(`WARNING: server "${name}" has an empty env value for "${key}" — the child may fail to start.`);
-        }
-      }
-    }
+  try {
+    await connectChild(name, serverCfg);
+  } catch (err) {
+    log(`ERROR connecting to [${name}]: ${err.message}`);
+    unavailableReasons[name] = `initial connection failed: ${err.message}`;
   }
 }
 
-function withTimeout(promise, ms, message) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-function scheduleReconnect(name, serverCfg, attempt = 0) {
-  if (attempt >= RECONNECT_DELAYS_MS.length) {
-    unavailableReasons[name] = "child crashed and failed to reconnect after 3 attempts";
-    delete clients[name];
-    log(`[${name}] giving up after ${RECONNECT_DELAYS_MS.length} reconnect attempts`);
+async function reloadConfig() {
+  let newConfig;
+  try {
+    newConfig = readAndValidateConfig(CONFIG_PATH);
+  } catch (err) {
+    log(`config reload failed, keeping previous config: ${err.message}`);
     return;
   }
 
-  const delay = RECONNECT_DELAYS_MS[attempt];
-  log(`[${name}] disconnected — reconnecting in ${delay}ms (attempt ${attempt + 1}/${RECONNECT_DELAYS_MS.length})`);
-  setTimeout(async () => {
-    try {
-      await connectChild(name, serverCfg);
-      delete unavailableReasons[name];
-      log(`[${name}] reconnected`);
-    } catch (err) {
-      log(`[${name}] reconnect attempt ${attempt + 1} failed: ${err.message}`);
-      scheduleReconnect(name, serverCfg, attempt + 1);
+  const oldServers = config.mcpServers;
+  const newServers = newConfig.mcpServers;
+  const allNames = new Set([...Object.keys(oldServers), ...Object.keys(newServers)]);
+
+  for (const name of allNames) {
+    const prevCfg = oldServers[name];
+    const nextCfg = newServers[name];
+    const wasActive = prevCfg && !prevCfg.disabled;
+    const isActive = nextCfg && !nextCfg.disabled;
+
+    if (wasActive && !isActive) {
+      disconnectChild(name);
+      log(`[${name}] removed/disabled via hot-reload`);
+      continue;
     }
-  }, delay);
-}
+    if (!isActive) continue;
 
-async function connectChild(name, serverCfg) {
-  log(`Connecting to [${name}]...`);
-  configs[name] = serverCfg;
+    const isNew = !wasActive;
+    const changed = !isNew && JSON.stringify(prevCfg) !== JSON.stringify(nextCfg);
+    if (!isNew && !changed) continue;
 
-  const client = new Client(
-    { name: `mcp-proxy/${name}`, version: "1.0.0" },
-    { capabilities: {} }
-  );
-
-  const transport = new StdioClientTransport({
-    command: serverCfg.command,
-    args: serverCfg.args || [],
-    env: { ...process.env, ...(serverCfg.env || {}) },
-  });
-
-  await withTimeout(
-    client.connect(transport),
-    serverCfg.connectTimeoutMs || DEFAULT_CONNECT_TIMEOUT_MS,
-    `[${name}] connect timed out after ${serverCfg.connectTimeoutMs || DEFAULT_CONNECT_TIMEOUT_MS}ms`
-  );
-
-  const { tools } = await client.listTools();
-
-  clients[name] = client;
-  toolMaps[name] = {};
-  for (const tool of tools) {
-    toolMaps[name][tool.name] = tool;
+    if (changed) disconnectChild(name);
+    await connectOrMarkLazy(name, nextCfg);
   }
 
-  client.onclose = () => {
-    if (clients[name] === client) {
-      delete clients[name];
-      scheduleReconnect(name, serverCfg);
-    }
-  };
-  client.onerror = (err) => {
-    log(`[${name}] transport error: ${err.message}`);
-  };
-
-  log(`[${name}] ready — ${tools.length} tools`);
-  return tools;
-}
-
-function buildMetaTool(mcpName) {
-  const subTools = toolMaps[mcpName];
-  const toolNames = Object.keys(subTools);
-
-  const toolSummaries = toolNames
-    .map((t) => `${t}: ${(subTools[t].description || "").slice(0, 80)}`)
-    .join("\n");
-
-  return {
-    name: mcpName,
-    description:
-      `Proxy to the "${mcpName}" MCP server.\n` +
-      `Pass tool_name (one of ${toolNames.length} tools) and tool_input.\n\n` +
-      `Available tools:\n${toolSummaries}`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        tool_name: {
-          type: "string",
-          description: `Which tool to call inside ${mcpName}.`,
-          enum: toolNames,
-        },
-        tool_input: {
-          type: "object",
-          description: "Arguments for the chosen tool (as defined by that tool's schema).",
-        },
-      },
-      required: ["tool_name", "tool_input"],
-    },
-  };
+  config = newConfig;
+  server.sendToolListChanged().catch(() => {});
+  log("config reloaded");
 }
 
 async function main() {
-  const entries = Object.entries(config.mcpServers);
-
-  for (const [name, serverCfg] of entries) {
+  for (const [name, serverCfg] of Object.entries(config.mcpServers)) {
     if (serverCfg.disabled) {
       log(`[${name}] skipped (disabled)`);
       continue;
     }
-    try {
-      await connectChild(name, serverCfg);
-    } catch (err) {
-      log(`ERROR connecting to [${name}]: ${err.message}`);
-      unavailableReasons[name] = `initial connection failed: ${err.message}`;
-      configs[name] = serverCfg;
-    }
+    await connectOrMarkLazy(name, serverCfg);
   }
 
   const readyMCPs = Object.keys(clients);
   log(`Proxy ready. Exposing ${readyMCPs.length} meta-tools: ${readyMCPs.join(", ")}`);
 
-  const server = new Server(
+  server = new Server(
     { name: "mcp-proxy", version: "1.0.0" },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: { listChanged: true }, resources: {}, prompts: {} } }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return { tools: Object.keys(toolMaps).map(buildMetaTool) };
-  });
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name: mcpName, arguments: args } = request.params;
-    const { tool_name, tool_input } = args ?? {};
-
-    const client = clients[mcpName];
-    if (!client) {
-      if (unavailableReasons[mcpName]) {
-        return error(`MCP "${mcpName}" is unavailable: ${unavailableReasons[mcpName]}`);
-      }
-      return error(`MCP "${mcpName}" is not connected.`);
-    }
-
-    if (!tool_name) {
-      return error(`"tool_name" is required. Available: ${Object.keys(toolMaps[mcpName]).join(", ")}`);
-    }
-
-    if (!toolMaps[mcpName][tool_name]) {
-      return error(
-        `Tool "${tool_name}" not found in "${mcpName}". ` +
-        `Available: ${Object.keys(toolMaps[mcpName]).join(", ")}`
-      );
-    }
-
-    const callTimeoutMs = (configs[mcpName] && configs[mcpName].callTimeoutMs) || DEFAULT_CALL_TIMEOUT_MS;
-
-    try {
-      return await withTimeout(
-        client.callTool({ name: tool_name, arguments: tool_input ?? {} }),
-        callTimeoutMs,
-        `${mcpName}.${tool_name} timed out after ${callTimeoutMs}ms`
-      );
-    } catch (e) {
-      return error(`${mcpName}.${tool_name} failed: ${e.message}`);
-    }
-  });
+  registerHandlers(server);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log("Listening on stdio.");
-}
 
-function log(msg) {
-  process.stderr.write(`[mcp-proxy] ${msg}\n`);
-}
-
-function error(msg) {
-  return {
-    content: [{ type: "text", text: msg }],
-    isError: true,
-  };
+  watchConfigFile(CONFIG_PATH, () => {
+    reloadConfig().catch((err) => log(`config reload error: ${err.message}`));
+  });
 }
 
 main().catch((e) => {
