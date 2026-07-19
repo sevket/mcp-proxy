@@ -141,7 +141,7 @@ The proxy watches `proxy-config.json` and picks up changes live — no restart n
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/sevket/mcp-proxy/blob/main/CONTRIBUTING.md).
 
 ## License
 
