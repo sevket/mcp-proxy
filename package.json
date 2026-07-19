@@ -1,6 +1,6 @@
 {
   "name": "mcp-tool-proxy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Lightweight MCP proxy that consolidates multiple MCP servers into single meta-tools",
   "type": "module",
   "main": "index.js",

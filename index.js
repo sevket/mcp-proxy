@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { join } from "path";
+import { existsSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { log } from "./src/logger.js";
 import { loadConfig, readAndValidateConfig, watchConfigFile } from "./src/config.js";
 import {
@@ -15,11 +17,18 @@ import {
 } from "./src/child-manager.js";
 import { registerHandlers } from "./src/router.js";
 
-// Resolved from the current working directory (not the script's own
-// location), so a global/npx install picks up the config in whatever
-// directory the user runs it from, same as a local clone run from its
-// own repo root.
-const CONFIG_PATH = join(process.cwd(), "proxy-config.json");
+// Prefer the current working directory (so a global/npx install picks up
+// the config in whatever directory the user runs it from) but fall back to
+// the script's own directory if there's no config at cwd — this keeps
+// working for an existing setup that points an MCP client straight at
+// index.js's absolute path without also setting a matching "cwd".
+function resolveConfigPath() {
+  const cwdPath = join(process.cwd(), "proxy-config.json");
+  if (existsSync(cwdPath)) return cwdPath;
+  return join(dirname(fileURLToPath(import.meta.url)), "proxy-config.json");
+}
+
+const CONFIG_PATH = resolveConfigPath();
 
 let config = loadConfig(CONFIG_PATH);
 let server;
